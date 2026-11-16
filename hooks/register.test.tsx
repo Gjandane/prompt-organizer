@@ -30,6 +30,7 @@ test('Organize rewrites the draft in the box and Undo restores it', async ($, on
   on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
   on('ui.toast', () => ({ value: undefined }))
   on('fs.exists', () => ({ value: false }))
+  on('clock.now', () => ({ value: 0 }))
   on('model.complete', (_, e) => {
     asked = e.prompt
 
@@ -50,9 +51,15 @@ test('Organize rewrites the draft in the box and Undo restores it', async ($, on
     await ui.press({ key: 'organize' })
     expect(asked).toContain(MESSY)
     expect(box).toBe(CLEAN)
+    expect(await ui.find({ type: 'Text', text: /Organized with Opus 5\.5/ })).toBeTruthy()
+
+    // Show original puts the draft as typed under the buttons.
+    await ui.press({ key: 'compare' })
+    expect((await ui.find({ type: 'Text', text: /fix login/ }))?.text).toBe(MESSY)
 
     await ui.press({ key: 'undo' })
     expect(box).toBe(MESSY)
+    expect(await ui.find({ type: 'Text', text: /original draft is back/ })).toBeTruthy()
     await ui.unmount()
   }
 })
@@ -63,6 +70,7 @@ test('an empty draft asks the model nothing', async ($, on) => {
   on('prompt.read', () => ({ value: { text: '   ', cursor: 0 } }))
   on('ui.toast', () => ({ value: undefined }))
   on('fs.exists', () => ({ value: false }))
+  on('clock.now', () => ({ value: 0 }))
   on('model.complete', () => {
     calls += 1
 
@@ -73,6 +81,7 @@ test('an empty draft asks the model nothing', async ($, on) => {
 
   await ui.press({ key: 'organize' })
   expect(calls).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /Type your draft/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -82,6 +91,7 @@ test('a failed rewrite leaves the draft alone', async ($, on) => {
   on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
   on('ui.toast', () => ({ value: undefined }))
   on('fs.exists', () => ({ value: false }))
+  on('clock.now', () => ({ value: 0 }))
   on('model.complete', () => ({
     value: { isAnswered: false, reason: 'empty-reply', usage: USAGE },
   }))
@@ -95,6 +105,8 @@ test('a failed rewrite leaves the draft alone', async ($, on) => {
 
   await ui.press({ key: 'organize' })
   expect(box).toBe(MESSY)
+  // The reason stays in the band until the next action.
+  expect(await ui.find({ type: 'Text', text: /Could not organize/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -103,6 +115,7 @@ test('settings.json picks the model, and a bad field falls back', async ($, on) 
   const toasts: string[] = []
 
   on('fs.exists', () => ({ value: true }))
+  on('clock.now', () => ({ value: 0 }))
   on('fs.read', () => ({
     value: JSON.stringify({ model: 'Sonnet 5.5', effort: 'turbo', timeoutSeconds: 30 }),
   }))
@@ -133,6 +146,7 @@ test('with no settings file the rewrite runs on Opus 5.5 at medium effort', asyn
   let sent: { model?: string; effort?: string } = {}
 
   on('fs.exists', () => ({ value: false }))
+  on('clock.now', () => ({ value: 0 }))
   on('prompt.read', () => ({ value: { text: MESSY, cursor: MESSY.length } }))
   on('ui.toast', () => ({ value: undefined }))
   on('model.complete', (_, e) => {
@@ -147,5 +161,28 @@ test('with no settings file the rewrite runs on Opus 5.5 at medium effort', asyn
   await ui.press({ key: 'organize' })
   expect(sent.model).toBe('claude-opus-5-5')
   expect(sent.effort).toBe('medium')
+  await ui.unmount()
+})
+
+test('the band counts the questions the rewrite ends with', async ($, on) => {
+  const withGaps = `${CLEAN}
+
+Unclear - ask me before assuming:
+1. Which login?
+2. How slow?`
+
+  on('fs.exists', () => ({ value: false }))
+  on('clock.now', () => ({ value: 0 }))
+  on('prompt.read', () => ({ value: { text: MESSY, cursor: MESSY.length } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('model.complete', () => ({
+    value: { isAnswered: true, text: withGaps, usage: USAGE },
+  }))
+  on('prompt.fill', () => ({ isFilled: true }))
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+
+  await ui.press({ key: 'organize' })
+  expect(await ui.find({ type: 'Text', text: /2 questions for you/ })).toBeTruthy()
   await ui.unmount()
 })

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Phase } from '../types'
+import type { Phase, Status } from '../types'
 
 const COMMAND = 'organize'
 
@@ -120,6 +120,22 @@ const original = atom(
   { plugin: 'prompt-organizer', key: 'original' } as const,
   null as string | null,
 )
+const status = atom(
+  { plugin: 'prompt-organizer', key: 'status' } as const,
+  null as Status | null,
+)
+const isComparing = atom(
+  { plugin: 'prompt-organizer', key: 'isComparing' } as const,
+  false,
+)
+const model = atom(
+  { plugin: 'prompt-organizer', key: 'model' } as const,
+  null as string | null,
+)
+
+// The heading the rewrite closes with when the draft leaves gaps; the rules
+// below name it and the band counts the questions under it.
+const UNCLEAR = 'Unclear - ask me before assuming:'
 
 const RULES = `You turn a person's rough, scattered draft into a clear prompt for an AI coding assistant. The person will review your rewrite and then send it themselves.
 
@@ -144,11 +160,13 @@ Shape
 - A draft with several distinct ideas gets short labeled sections, using only the ones that have content: Goal, Context, Requirements, Constraints, Done when. Use a numbered list where order matters and bullets otherwise.
 
 Gaps
-- If part of the draft is ambiguous, contradicts another part, or leaves out a detail the assistant would have to guess, end with a section titled "Unclear - ask me before assuming:" that lists each gap as one short question. List at most five, most important first. Do not answer them. Leave the section out entirely when there are no real gaps.
+- If part of the draft is ambiguous, contradicts another part, or leaves out a detail the assistant would have to guess, end with a section titled "${UNCLEAR}" that lists each gap as one short question. List at most five, most important first. Do not answer them. Leave the section out entirely when there are no real gaps.
 
 Output only the rewritten prompt as plain text or light Markdown. Do not wrap it in a code fence and do not add any preface or closing remark.`
 
-type Rewrite = { isOk: true; text: string } | { isOk: false; why: string }
+type Rewrite =
+  | { isOk: true; text: string; model: string }
+  | { isOk: false; why: string }
 
 // A reply fenced whole is unwrapped; everything else is kept as written.
 const unwrap = (reply: string): string => {
@@ -156,6 +174,31 @@ const unwrap = (reply: string): string => {
   const fenced = /^```[\w-]*\n([\s\S]*?)\n```$/.exec(text)
 
   return (fenced?.[1] ?? text).trim()
+}
+
+// How many gaps the rewrite listed under its closing "Unclear" section.
+const countQuestions = (text: string): number => {
+  const at = text.toLowerCase().lastIndexOf(UNCLEAR.toLowerCase())
+
+  if (at < 0) {
+    return 0
+  }
+
+  return text
+    .slice(at)
+    .split('\n')
+    .filter(line => /^\s*(?:\d+[.)]|[-*])\s+\S/.test(line)).length
+}
+
+// What the band says once a rewrite is in the box.
+const summary = (model: string, ms: number, questions: number): string => {
+  const seconds = Math.max(1, Math.round(ms / 1000))
+  const next =
+    questions === 0
+      ? 'Review it, then press Enter.'
+      : `It ends with ${questions} question${questions === 1 ? '' : 's'} for you to answer.`
+
+  return `Organized with ${model} in ${seconds}s. ${next}`
 }
 
 // The running rewrite's cancel handle. A reload drops it, and session.start
@@ -168,6 +211,8 @@ const rewrite = async ($: EngineInterface, draft: string): Promise<Rewrite> => {
   if (problem) {
     $.ui.toast(problem)
   }
+
+  await update($, model, () => settings.model)
 
   stop = new AbortController()
   const reply = await $.model.complete(
@@ -196,12 +241,12 @@ const rewrite = async ($: EngineInterface, draft: string): Promise<Rewrite> => {
     const text = unwrap(reply.text)
 
     return text
-      ? { isOk: true, text }
-      : { isOk: false, why: 'The model returned an empty rewrite.' }
+      ? { isOk: true, text, model: settings.model }
+      : { isOk: false, why: 'The model returned an empty rewrite. Your draft is unchanged.' }
   }
 
   if (reply.reason === 'aborted') {
-    return { isOk: false, why: 'Organizing cancelled. Your draft is unchanged.' }
+    return { isOk: false, why: 'Cancelled. Your draft is unchanged.' }
   }
 
   return {
@@ -209,6 +254,9 @@ const rewrite = async ($: EngineInterface, draft: string): Promise<Rewrite> => {
     why: `Could not organize the prompt (${reply.reason}). Your draft is unchanged.`,
   }
 }
+
+const say = ($: EngineInterface, tone: Status['tone'], text: string): Promise<unknown> =>
+  update($, status, () => ({ tone, text }))
 
 // The button's press: the draft in the box is rewritten in place.
 const organizeBox = async ($: EngineInterface): Promise<void> => {
@@ -220,24 +268,26 @@ const organizeBox = async ($: EngineInterface): Promise<void> => {
   const draft = box.text.trim()
 
   if (!draft) {
-    $.ui.toast('Type your draft in the prompt box first, then click Organize.')
+    await say($, 'info', 'Type your draft in the prompt box first.')
 
     return
   }
 
   if (draft.startsWith('/')) {
-    $.ui.toast('That draft is a slash command, so it was left as is.')
+    await say($, 'info', 'That draft is a slash command, so it was left as is.')
 
     return
   }
 
+  await update($, status, () => null)
   await update($, phase, () => 'working' as Phase)
 
   try {
+    const startedAt = await $.clock.now()
     const result = await rewrite($, draft)
 
     if (!result.isOk) {
-      $.ui.toast(result.why)
+      await say($, 'error', result.why)
 
       return
     }
@@ -246,7 +296,7 @@ const organizeBox = async ($: EngineInterface): Promise<void> => {
     const now = await $.prompt.read()
 
     if (now.text !== box.text) {
-      $.ui.toast('You kept typing, so the rewrite was not applied. Click Organize again.')
+      await say($, 'info', 'You kept typing, so the rewrite was not applied. Click Organize again.')
 
       return
     }
@@ -254,13 +304,16 @@ const organizeBox = async ($: EngineInterface): Promise<void> => {
     const filled = await $.prompt.fill({ text: result.text, mode: 'replace' })
 
     if (!filled.isFilled) {
-      $.ui.toast('The prompt box could not take the rewrite. Your draft is unchanged.')
+      await say($, 'error', 'The prompt box could not take the rewrite. Your draft is unchanged.')
 
       return
     }
 
+    const took = (await $.clock.now()) - startedAt
+
     await update($, original, () => box.text)
-    $.ui.toast('Prompt organized. Review it, then press Enter to send.')
+    await update($, isComparing, () => false)
+    await say($, 'ok', summary(result.model, took, countQuestions(result.text)))
   } finally {
     await update($, phase, () => 'idle' as Phase)
   }
@@ -277,6 +330,8 @@ const undo = async ($: EngineInterface): Promise<void> => {
 
   if (filled.isFilled) {
     await update($, original, () => null)
+    await update($, isComparing, () => false)
+    await say($, 'info', 'Your original draft is back in the box.')
   }
 }
 
@@ -289,6 +344,8 @@ export const register: Register = on => {
       argumentHint: '<messy draft>',
     })
     await update($, phase, () => 'idle' as Phase)
+    const { settings } = await loadSettings($)
+    await update($, model, () => settings.model)
 
     return next(e)
   })
@@ -303,9 +360,11 @@ export const register: Register = on => {
       }
     }
 
+    await update($, status, () => null)
     await update($, phase, () => 'working' as Phase)
 
     try {
+      const startedAt = await $.clock.now()
       const result = await rewrite($, draft)
 
       if (!result.isOk) {
@@ -318,7 +377,11 @@ export const register: Register = on => {
         return { text: `Organized prompt:\n\n${result.text}` }
       }
 
+      const took = (await $.clock.now()) - startedAt
+
       await update($, original, () => draft)
+      await update($, isComparing, () => false)
+      await say($, 'ok', summary(result.model, took, countQuestions(result.text)))
 
       return {
         text: 'Organized prompt is in the prompt box. Review it, then press Enter to send.',
@@ -328,10 +391,18 @@ export const register: Register = on => {
     }
   })
 
-  // Once a prompt is sent there is nothing left to undo.
+  // Once a prompt is sent there is nothing left to undo or report.
   on('prompt.submit', async ($, e, next) => {
     if ((await read($, original)) !== null) {
       await update($, original, () => null)
+    }
+
+    if ((await read($, status)) !== null) {
+      await update($, status, () => null)
+    }
+
+    if (await read($, isComparing)) {
+      await update($, isComparing, () => false)
     }
 
     return next(e)
@@ -342,29 +413,65 @@ export const register: Register = on => {
       return next(e)
     }
 
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Progress, Text } = $.ui.resolve(e)
     const isWorking = (await read($, phase)) === 'working'
-    const canUndo = (await read($, original)) !== null
+    const before = await read($, original)
+    const note = await read($, status)
+    const name = (await read($, model)) ?? DEFAULTS.model
 
     if (isWorking) {
       return (
-        <Box gap={1}>
-          <Text dimColor>Organizing your prompt...</Text>
+        <Box gap={1} alignItems="center">
+          <Progress label={`Organizing with ${name}`} />
           <Button key="cancel" label="Cancel" onPress={() => stop?.abort()} />
         </Box>
       )
     }
 
+    const isOrganized = before !== null
+    const isOpen = isOrganized && (await read($, isComparing))
+    // The hint needs room beside the button; a narrow band goes without it.
+    const hasRoom = e.props.bodyColumns >= 72
+
     return (
-      <Box gap={1}>
-        <Button
-          key="organize"
-          label="Organize prompt"
-          variant="primary"
-          onPress={() => organizeBox($)}
-        />
-        {canUndo && (
-          <Button key="undo" label="Undo" onPress={() => undo($)} />
+      <Box flexDirection="column">
+        <Box gap={1} alignItems="center" flexWrap="wrap">
+          <Button
+            key="organize"
+            label="Organize prompt"
+            variant={isOrganized ? 'secondary' : 'primary'}
+            onPress={() => organizeBox($)}
+          />
+          {isOrganized && <Button key="undo" label="Undo" onPress={() => undo($)} />}
+          {isOrganized && (
+            <Button
+              key="compare"
+              label={isOpen ? 'Hide original' : 'Show original'}
+              onPress={() => update($, isComparing, shown => !shown)}
+            />
+          )}
+          {note?.tone === 'ok' && <Text color="success">{note.text}</Text>}
+          {note?.tone === 'error' && <Text color="error">{note.text}</Text>}
+          {note?.tone === 'info' && <Text dimColor>{note.text}</Text>}
+          {note === null && hasRoom && (
+            <Text dimColor>
+              Rewrites your draft with {name}. Nothing is sent until you press Enter.
+            </Text>
+          )}
+        </Box>
+        {isOpen && (
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderDimColor
+            paddingX={1}
+            marginTop={1}
+          >
+            <Text dimColor bold>
+              Your original draft
+            </Text>
+            <Text dimColor>{before}</Text>
+          </Box>
         )}
       </Box>
     )
