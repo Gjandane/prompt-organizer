@@ -344,7 +344,7 @@ const organizeFirst = async (
     }
 
     if (kept.isFilled && (await $.prompt.read()).text !== draft) {
-      await say($, 'info', 'You kept typing, so the rewrite was not applied. Click Organize again.')
+      await say($, 'info', 'You kept typing, so the rewrite was not applied. Press Enter to send what is in the box.')
 
       return 'Not sent. You kept typing, so the rewrite was not applied.'
     }
@@ -392,7 +392,7 @@ export const register: Register = on => {
 
     if (!draft) {
       return {
-        text: 'Usage: /organize <messy draft>. Or type a draft and click Organize above the prompt box.',
+        text: 'Usage: /organize <messy draft>.',
       }
     }
 

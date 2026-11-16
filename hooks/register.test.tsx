@@ -232,3 +232,16 @@ test('the band counts the questions the rewrite ends with', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /2 questions for you/ })).toBeTruthy()
   await ui.unmount()
 })
+
+test('a new session starts with the toggle as it was left', async ($, on) => {
+  stage(on, { isOn: true })
+  on('command.register', () => ({ value: undefined }))
+  on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/tmp', surface: 'desktop', isInteractive: false })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+
+  expect(await ui.find({ type: 'Button', label: 'Organizer: On' })).toBeTruthy()
+  await ui.unmount()
+})
