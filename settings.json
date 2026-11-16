@@ -2,5 +2,6 @@
   "model": "Opus 5.5",
   "effort": "medium",
   "timeoutSeconds": 90,
-  "maxOutputTokens": 4096
+  "maxOutputTokens": 4096,
+  "organizeFirstPrompt": true
 }

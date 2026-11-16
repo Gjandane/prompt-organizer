@@ -186,3 +186,96 @@ Unclear - ask me before assuming:
   expect(await ui.find({ type: 'Text', text: /2 questions for you/ })).toBeTruthy()
   await ui.unmount()
 })
+
+// The engine's bottom of the prompt.submit chain: the prompt enters as sent.
+const ENTER = { kind: 'composer' } as const
+
+test('a new session\'s first message is organized into the box, not sent', async ($, on) => {
+  let box = ''
+  const entered: string[] = []
+
+  on('fs.exists', () => ({ value: false }))
+  on('clock.now', () => ({ value: 0 }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.turns', () => ({ value: entered.length }))
+  on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
+  on('model.complete', () => ({
+    value: { isAnswered: true, text: CLEAN, usage: USAGE },
+  }))
+  on('prompt.fill', (_, e) => {
+    box = e.text
+
+    return { isFilled: true }
+  })
+  on('prompt.submit', (_, e) => {
+    entered.push(e.text)
+
+    return { text: e.text }
+  })
+
+  const first = await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+
+  expect(first.drop).toContain('review it in the box')
+  expect(entered).toEqual([])
+  expect(box).toBe(CLEAN)
+
+  // The reviewed rewrite, sent with Enter, goes through.
+  const second = await $.prompt.submit({ text: box, wait: false, origin: ENTER })
+
+  expect(second.drop).toBeUndefined()
+  expect(entered).toEqual([CLEAN])
+})
+
+test('with no prompt box the first message goes through with no model call', async ($, on) => {
+  let calls = 0
+  const entered: string[] = []
+
+  on('fs.exists', () => ({ value: false }))
+  on('session.turns', () => ({ value: 0 }))
+  on('prompt.fill', () => ({ isFilled: false, refusal: 'no_composer' }))
+  on('model.complete', () => {
+    calls += 1
+
+    return { value: { isAnswered: true, text: CLEAN, usage: USAGE } }
+  })
+  on('prompt.submit', (_, e) => {
+    entered.push(e.text)
+
+    return { text: e.text }
+  })
+
+  await $.prompt.submit({ text: MESSY, wait: false, origin: { kind: 'sdk' } })
+  expect(calls).toBe(0)
+  expect(entered).toEqual([MESSY])
+})
+
+test('organizeFirstPrompt false sends the first message as typed', async ($, on) => {
+  const entered: string[] = []
+
+  on('fs.exists', () => ({ value: true }))
+  on('fs.read', () => ({ value: JSON.stringify({ organizeFirstPrompt: false }) }))
+  on('session.turns', () => ({ value: 0 }))
+  on('prompt.submit', (_, e) => {
+    entered.push(e.text)
+
+    return { text: e.text }
+  })
+
+  await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+  expect(entered).toEqual([MESSY])
+})
+
+test('a resumed session\'s next message is not caught', async ($, on) => {
+  const entered: string[] = []
+
+  on('fs.exists', () => ({ value: false }))
+  on('session.turns', () => ({ value: 4 }))
+  on('prompt.submit', (_, e) => {
+    entered.push(e.text)
+
+    return { text: e.text }
+  })
+
+  await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+  expect(entered).toEqual([MESSY])
+})

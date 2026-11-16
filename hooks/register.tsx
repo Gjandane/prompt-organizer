@@ -18,6 +18,8 @@ type Settings = {
   timeoutSeconds: number
   /** The cap on the rewrite's length, in tokens. */
   maxOutputTokens: number
+  /** Whether a new session's first message is organized instead of sent. */
+  organizeFirstPrompt: boolean
 }
 
 const SETTINGS_FILE = 'settings.json'
@@ -27,6 +29,7 @@ const DEFAULTS: Settings = {
   effort: 'medium',
   timeoutSeconds: 90,
   maxOutputTokens: 4096,
+  organizeFirstPrompt: true,
 }
 
 // A model written by name becomes its id: "Opus 5.5" is "claude-opus-5-5".
@@ -107,6 +110,12 @@ const loadSettings = async (
     ignored.push('maxOutputTokens')
   }
 
+  if (typeof stored.organizeFirstPrompt === 'boolean') {
+    settings.organizeFirstPrompt = stored.organizeFirstPrompt
+  } else if (stored.organizeFirstPrompt !== undefined) {
+    ignored.push('organizeFirstPrompt')
+  }
+
   return ignored.length > 0
     ? {
         settings,
@@ -131,6 +140,10 @@ const isComparing = atom(
 const model = atom(
   { plugin: 'prompt-organizer', key: 'model' } as const,
   null as string | null,
+)
+const isFirstHandled = atom(
+  { plugin: 'prompt-organizer', key: 'isFirstHandled' } as const,
+  false,
 )
 
 // The heading the rewrite closes with when the draft leaves gaps; the rules
@@ -161,6 +174,7 @@ Shape
 
 Gaps
 - If part of the draft is ambiguous, contradicts another part, or leaves out a detail the assistant would have to guess, end with a section titled "${UNCLEAR}" that lists each gap as one short question. List at most five, most important first. Do not answer them. Leave the section out entirely when there are no real gaps.
+- The questions are the one exception to the first-person voice. The assistant will read them and ask them back to the person, so write each one addressed to the person in second person, as the assistant would ask it: "Do you want me to build an app, or do you want a written study plan?" Never mix "I" and "you" for the person inside one question; a question like "Do you want me to build an app, or do I want a plan?" is unreadable.
 
 Output only the rewritten prompt as plain text or light Markdown. Do not wrap it in a code fence and do not add any preface or closing remark.`
 
@@ -335,6 +349,60 @@ const undo = async ($: EngineInterface): Promise<void> => {
   }
 }
 
+// The desktop app starts a session only when its first message is sent, so
+// no band is drawn on the new-session screen. Instead the first message the
+// person sends is caught here: put back in the box, held from the model, and
+// rewritten in place for review. Returns the reason the message was held, or
+// null when it should go through as typed.
+const organizeFirst = async (
+  $: EngineInterface,
+  draft: string,
+): Promise<string | null> => {
+  // Putting the draft back first proves there is a box to review in; a
+  // headless run has none, and its message goes through with no model call.
+  const kept = await $.prompt.fill({ text: draft, mode: 'replace' })
+
+  if (!kept.isFilled) {
+    return null
+  }
+
+  await update($, status, () => null)
+  await update($, phase, () => 'working' as Phase)
+
+  try {
+    const startedAt = await $.clock.now()
+    const result = await rewrite($, draft)
+
+    if (!result.isOk) {
+      await say($, 'error', result.why)
+
+      return `Not sent. ${result.why}`
+    }
+
+    if ((await $.prompt.read()).text !== draft) {
+      await say($, 'info', 'You kept typing, so the rewrite was not applied. Click Organize again.')
+
+      return 'Not sent. You kept typing, so the rewrite was not applied.'
+    }
+
+    const filled = await $.prompt.fill({ text: result.text, mode: 'replace' })
+
+    if (!filled.isFilled) {
+      return 'Not sent. The prompt box could not take the rewrite; your draft is back in the box.'
+    }
+
+    const took = (await $.clock.now()) - startedAt
+
+    await update($, original, () => draft)
+    await update($, isComparing, () => false)
+    await say($, 'ok', summary(result.model, took, countQuestions(result.text)))
+
+    return 'Not sent yet. Your first message was organized: review it in the box, then press Enter.'
+  } finally {
+    await update($, phase, () => 'idle' as Phase)
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -391,8 +459,35 @@ export const register: Register = on => {
     }
   })
 
-  // Once a prompt is sent there is nothing left to undo or report.
   on('prompt.submit', async ($, e, next) => {
+    // Only a new session's first message, typed by the person, is caught.
+    // A slash command, a message with attachments and a resumed session's
+    // next message go through as sent.
+    if (!(await read($, isFirstHandled))) {
+      await update($, isFirstHandled, () => true)
+
+      const isPersonal = ['composer', 'bridge', 'sdk'].includes(e.origin.kind)
+      const draft = e.text.trim()
+
+      if (
+        isPersonal &&
+        draft &&
+        !e.command &&
+        !e.isMeta &&
+        !e.turnId &&
+        !e.attachments?.length &&
+        (await $.session.turns()) === 0 &&
+        (await loadSettings($)).settings.organizeFirstPrompt
+      ) {
+        const held = await organizeFirst($, e.text)
+
+        if (held !== null) {
+          return { drop: held }
+        }
+      }
+    }
+
+    // Once a prompt is sent there is nothing left to undo or report.
     if ((await read($, original)) !== null) {
       await update($, original, () => null)
     }

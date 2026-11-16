@@ -16,6 +16,8 @@ declare module 'claude-code' {
       isComparing: boolean
       /** The model named in settings.json when it was last read. */
       model: string | null
+      /** Whether this session's first message has been seen, organized or not. */
+      isFirstHandled: boolean
     }
   }
 }

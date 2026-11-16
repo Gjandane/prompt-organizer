@@ -62,6 +62,12 @@ In the desktop app, `/plugin` does not run. Instead, click **+** next to the pro
 2. Click **Organize prompt** in the band directly above the box. While the rewrite runs, the band shows a progress line naming the model and a **Cancel** button.
 3. The rewrite replaces your draft in the box. The band says which model wrote it, how long it took, and how many questions it ends with. Read it, edit it if you want, and press Enter to send it yourself.
 
+### Your first message
+
+The band only appears once a session is running, and the desktop app starts a session only when you send its first message. So the mod catches that first message instead: type your draft on the new-session screen and press Enter. The message is held back from the model and organized, and the rewrite lands in the prompt box for you to review. Press Enter again to send it. Undo and Show original work as they do after a click.
+
+Only the first message of a new session is caught, and only when you typed it. A slash command, a message with attachments, a resumed session and a headless `claude -p` run all go through as sent. Set `organizeFirstPrompt` to `false` to turn this off.
+
 **Undo** appears after a successful rewrite and puts your original draft back. It stays available until you send a prompt. After that there is nothing to undo.
 
 **Show original** appears beside Undo and opens your draft as typed under the buttons, so you can check the rewrite against it. **Hide original** closes it.
@@ -93,7 +99,8 @@ Settings live in `settings.json` at the root of the mod's folder. The mod reads 
   "model": "Opus 5.5",
   "effort": "medium",
   "timeoutSeconds": 90,
-  "maxOutputTokens": 4096
+  "maxOutputTokens": 4096,
+  "organizeFirstPrompt": true
 }
 ```
 
@@ -103,6 +110,7 @@ Settings live in `settings.json` at the root of the mod's folder. The mod reads 
 | `effort` | `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | `"medium"` |
 | `timeoutSeconds` | Whole number from 5 to 600 | `90` |
 | `maxOutputTokens` | Whole number from 256 to 64000 | `4096` |
+| `organizeFirstPrompt` | `true` or `false` | `true` |
 
 `model` takes a model by name, such as `"Opus 5.5"`, `"Sonnet 5.5"` or `"Haiku 5.5"`. The mod turns a name into its id, so `"Sonnet 5.5"` is sent as `claude-sonnet-5-5`. A full model id or an alias such as `opus` is sent as written, for Claude Code to resolve.
 
@@ -124,12 +132,12 @@ The model gets a fixed set of rules plus your draft, and nothing else. In plain 
 - **Your voice, your language.** The result is in first person, as you would have written it with time to think, in the language of the draft.
 - **Goal first.** Then background, specifics, limits, and how you will know it is done.
 - **Shape follows size.** One or two ideas become one to three plain sentences with no headings. Several distinct ideas get short labeled sections, only those with content: Goal, Context, Requirements, Constraints, Done when. Numbered lists where order matters, bullets otherwise.
-- **Gaps become questions.** If something is ambiguous, contradicts itself, or leaves out a detail the assistant would have to guess, the rewrite ends with "Unclear - ask me before assuming:" and at most five short questions, most important first. With no real gaps, that section is left out.
+- **Gaps become questions.** If something is ambiguous, contradicts itself, or leaves out a detail the assistant would have to guess, the rewrite ends with "Unclear - ask me before assuming:" and at most five short questions, most important first. The questions are the one part not in your voice: they are written to you, as the assistant would ask them. With no real gaps, that section is left out.
 - **No filler.** No "You are an expert" openers, no flattery, no capital-letter emphasis, no commentary about the rewrite.
 
 ## Things to know
 
-- Each click is one extra model call, billed to your session like any other.
+- Each click, and each caught first message, is one extra model call, billed to your session like any other.
 - The draft goes to the model through the session's own API client. Only the draft is sent. The rewrite does not see your conversation, so a draft that says "fix the bug we just discussed" stays exactly that vague, and will likely get a question in the unclear list.
 - The button sits in the band above the prompt box because mods cannot place a control beside the **+** itself.
 - Drafts with image attachments are untested.
@@ -148,4 +156,4 @@ Run the tests:
 claude plugin test <folder>
 ```
 
-The tests in `hooks/register.test.tsx` cover: Organize rewriting the box and Undo restoring it, in both the terminal and the desktop app; Show original; an empty draft making no model call; a failed rewrite leaving the draft alone and its reason staying in the band; the count of questions a rewrite ends with; `settings.json` choosing the model, with an invalid field falling back to its default and a toast; and the Opus 5.5, medium-effort defaults when there is no settings file.
+The tests in `hooks/register.test.tsx` cover: Organize rewriting the box and Undo restoring it, in both the terminal and the desktop app; Show original; an empty draft making no model call; a failed rewrite leaving the draft alone and its reason staying in the band; the count of questions a rewrite ends with; `settings.json` choosing the model, with an invalid field falling back to its default and a toast; the Opus 5.5, medium-effort defaults when there is no settings file; a new session's first message being organized into the box instead of sent; and that message going through untouched with no prompt box, with `organizeFirstPrompt` off, or in a resumed session.
