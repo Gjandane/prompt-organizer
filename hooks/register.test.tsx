@@ -197,6 +197,8 @@ test('a new session\'s first message is organized into the box, not sent', async
   on('fs.exists', () => ({ value: false }))
   on('clock.now', () => ({ value: 0 }))
   on('ui.toast', () => ({ value: undefined }))
+  on('session.surfaces', () => ({ value: ['desktop'] }))
+  on('fs.write', () => ({ value: undefined }))
   on('session.turns', () => ({ value: entered.length }))
   on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
   on('model.complete', () => ({
@@ -231,6 +233,9 @@ test('with no prompt box the first message goes through with no model call', asy
   const entered: string[] = []
 
   on('fs.exists', () => ({ value: false }))
+  on('clock.now', () => ({ value: 0 }))
+  on('session.surfaces', () => ({ value: ['desktop'] }))
+  on('fs.write', () => ({ value: undefined }))
   on('session.turns', () => ({ value: 0 }))
   on('prompt.fill', () => ({ isFilled: false, refusal: 'no_composer' }))
   on('model.complete', () => {
@@ -254,6 +259,9 @@ test('organizeFirstPrompt false sends the first message as typed', async ($, on)
 
   on('fs.exists', () => ({ value: true }))
   on('fs.read', () => ({ value: JSON.stringify({ organizeFirstPrompt: false }) }))
+  on('clock.now', () => ({ value: 0 }))
+  on('session.surfaces', () => ({ value: ['desktop'] }))
+  on('fs.write', () => ({ value: undefined }))
   on('session.turns', () => ({ value: 0 }))
   on('prompt.submit', (_, e) => {
     entered.push(e.text)
@@ -269,6 +277,9 @@ test('a resumed session\'s next message is not caught', async ($, on) => {
   const entered: string[] = []
 
   on('fs.exists', () => ({ value: false }))
+  on('clock.now', () => ({ value: 0 }))
+  on('session.surfaces', () => ({ value: ['desktop'] }))
+  on('fs.write', () => ({ value: undefined }))
   on('session.turns', () => ({ value: 4 }))
   on('prompt.submit', (_, e) => {
     entered.push(e.text)
@@ -278,4 +289,44 @@ test('a resumed session\'s next message is not caught', async ($, on) => {
 
   await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
   expect(entered).toEqual([MESSY])
+})
+
+test('a desktop app whose box attaches late still gets the rewrite', async ($, on) => {
+  let box = ''
+  let fills = 0
+  const entered: string[] = []
+
+  on('fs.exists', () => ({ value: false }))
+  on('fs.write', () => ({ value: undefined }))
+  on('clock.now', () => ({ value: 0 }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.surfaces', () => ({ value: [] }))
+  on('session.turns', () => ({ value: 0 }))
+  on('model.complete', () => ({
+    value: { isAnswered: true, text: CLEAN, usage: USAGE },
+  }))
+  // The first two fills land before the app has bound its box.
+  on('prompt.fill', (_, e) => {
+    fills += 1
+
+    if (fills <= 2) {
+      return { isFilled: false, refusal: 'no_composer' }
+    }
+
+    box = e.text
+
+    return { isFilled: true }
+  })
+  on('prompt.submit', (_, e) => {
+    entered.push(e.text)
+
+    return { text: e.text }
+  })
+
+  const first = await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+
+  expect(first.drop).toContain('review it in the box')
+  expect(entered).toEqual([])
+  expect(box).toBe(CLEAN)
 })

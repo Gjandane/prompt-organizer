@@ -349,20 +349,53 @@ const undo = async ($: EngineInterface): Promise<void> => {
   }
 }
 
+// One line per first message, beside the mod's folder, saying what the
+// catch decided and why. Temporary, while the desktop path is being proven.
+const trace = async ($: EngineInterface, line: string): Promise<void> => {
+  try {
+    const path = `${$.plugin.root}.debug.log`
+    const before = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+    const at = new Date((await $.clock.now())).toISOString()
+
+    await $.fs.write(path, `${before}${at} ${line}
+`)
+  } catch {
+    // A log that cannot be written changes nothing.
+  }
+}
+
+// Fills the box, waiting a little for a desktop app that has not attached
+// yet: a new desktop session binds its prompt box only after the first send.
+const fillWhenReady = async ($: EngineInterface, text: string) => {
+  let filled = await $.prompt.fill({ text, mode: 'replace' })
+
+  for (let tries = 0; !filled.isFilled && filled.refusal !== 'dialog' && tries < 10; tries++) {
+    await $.clock.sleep(500).catch(() => undefined)
+    filled = await $.prompt.fill({ text, mode: 'replace' })
+  }
+
+  return filled
+}
+
 // The desktop app starts a session only when its first message is sent, so
 // no band is drawn on the new-session screen. Instead the first message the
-// person sends is caught here: put back in the box, held from the model, and
-// rewritten in place for review. Returns the reason the message was held, or
-// null when it should go through as typed.
+// person sends is caught here: held from the model, rewritten, and put in the
+// box for review. Returns the reason the message was held, or null when it
+// should go through as typed.
 const organizeFirst = async (
   $: EngineInterface,
   draft: string,
+  isFromApp: boolean,
 ): Promise<string | null> => {
-  // Putting the draft back first proves there is a box to review in; a
+  // Putting the draft back first proves there is a box to review in. A
   // headless run has none, and its message goes through with no model call.
+  // An app the person typed in may simply not have attached its box yet.
   const kept = await $.prompt.fill({ text: draft, mode: 'replace' })
+  const isBoxLate = !kept.isFilled && kept.refusal !== 'dialog' && isFromApp
 
-  if (!kept.isFilled) {
+  await trace($, `first message: kept=${kept.isFilled} refusal=${kept.refusal ?? '-'} late=${isBoxLate}`)
+
+  if (!kept.isFilled && !isBoxLate) {
     return null
   }
 
@@ -376,19 +409,24 @@ const organizeFirst = async (
     if (!result.isOk) {
       await say($, 'error', result.why)
 
-      return `Not sent. ${result.why}`
+      // With no box to put the draft back in, it goes through as typed.
+      return kept.isFilled ? `Not sent. ${result.why}` : null
     }
 
-    if ((await $.prompt.read()).text !== draft) {
+    if (kept.isFilled && (await $.prompt.read()).text !== draft) {
       await say($, 'info', 'You kept typing, so the rewrite was not applied. Click Organize again.')
 
       return 'Not sent. You kept typing, so the rewrite was not applied.'
     }
 
-    const filled = await $.prompt.fill({ text: result.text, mode: 'replace' })
+    const filled = await fillWhenReady($, result.text)
+
+    await trace($, `rewrite filled=${filled.isFilled} refusal=${filled.refusal ?? '-'}`)
 
     if (!filled.isFilled) {
-      return 'Not sent. The prompt box could not take the rewrite; your draft is back in the box.'
+      return `Not sent. The prompt box could not take the rewrite, so here it is to copy:
+
+${result.text}`
     }
 
     const took = (await $.clock.now()) - startedAt
@@ -466,20 +504,27 @@ export const register: Register = on => {
     if (!(await read($, isFirstHandled))) {
       await update($, isFirstHandled, () => true)
 
-      const isPersonal = ['composer', 'bridge', 'sdk'].includes(e.origin.kind)
-      const draft = e.text.trim()
+      const isFromApp = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+      const isPersonal = isFromApp || e.origin.kind === 'sdk'
+      const turns = await $.session.turns()
+      const isOn = (await loadSettings($)).settings.organizeFirstPrompt
+
+      await trace(
+        $,
+        `submit origin=${e.origin.kind} turns=${turns} command=${e.command?.name ?? '-'} meta=${e.isMeta ?? false} turnId=${e.turnId ?? '-'} attachments=${e.attachments?.length ?? 0} on=${isOn} surfaces=${JSON.stringify(await $.session.surfaces())}`,
+      )
 
       if (
         isPersonal &&
-        draft &&
+        e.text.trim() &&
         !e.command &&
         !e.isMeta &&
         !e.turnId &&
         !e.attachments?.length &&
-        (await $.session.turns()) === 0 &&
-        (await loadSettings($)).settings.organizeFirstPrompt
+        turns === 0 &&
+        isOn
       ) {
-        const held = await organizeFirst($, e.text)
+        const held = await organizeFirst($, e.text, isFromApp)
 
         if (held !== null) {
           return { drop: held }
