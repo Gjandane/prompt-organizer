@@ -1,6 +1,6 @@
 # prompt-organizer
 
-A Claude Code mod that adds an **Organize prompt** button above the prompt box. Type your draft the way it comes out of your head, click the button, and one model call rewrites it into a clear, ordered prompt in the same box. Nothing is sent until you press Enter.
+A Claude Code mod that rewrites the first message of each new session into a clear, ordered prompt before it is sent. Turn it on with the **Organizer** toggle above the prompt box. Type your draft the way it comes out of your head and press Enter. One model call rewrites it, and the rewrite lands in the prompt box for you to read. Press Enter again to send it.
 
 It is for people whose prompts arrive as a stream of half-ordered thoughts, with the constraint at the end, a correction in the middle and the actual goal buried somewhere in between.
 
@@ -58,21 +58,26 @@ In the desktop app, `/plugin` does not run. Instead, click **+** next to the pro
 
 ## Usage
 
-1. Type your draft in the prompt box.
-2. Click **Organize prompt** in the band directly above the box. While the rewrite runs, the band shows a progress line naming the model and a **Cancel** button.
-3. The rewrite replaces your draft in the box. The band says which model wrote it, how long it took, and how many questions it ends with. Read it, edit it if you want, and press Enter to send it yourself.
+1. Click **Organizer: Off** in the band above the prompt box. It turns to **Organizer: On**. The mod remembers the setting across sessions, and it starts Off.
+2. Start a new session, type your draft, and press Enter. The message does not reach the model. While the rewrite runs, the band shows a progress line naming the model and a **Cancel** button.
+3. The rewrite replaces your draft in the box. The band says which model wrote it, how long it took, and how many questions it ends with. Edit it if you want, then press Enter to send.
 
-### Your first message
+Only the first message of a session is organized. Every message after it is sent as typed, even with the toggle on. The second Enter always goes through, whatever the box holds, so a failed rewrite or an Undo never traps you.
 
-The band only appears once a session is running, and the desktop app starts a session only when you send its first message. So the mod catches that first message instead: type your draft on the new-session screen and press Enter. The message is held back from the model and organized, and the rewrite lands in the prompt box for you to review. Press Enter again to send it. Undo and Show original work as they do after a click.
+The toggle needs a running session to draw, and the desktop app starts one only when you send the first message. So the new-session screen shows no toggle, but the setting you chose last still applies there.
 
-Only the first message of a new session is caught, and only when you typed it. A slash command, a message with attachments, a resumed session and a headless `claude -p` run all go through as sent. Set `organizeFirstPrompt` to `false` to turn this off.
+The mod also leaves these first messages alone:
 
-**Undo** appears after a successful rewrite and puts your original draft back. It stays available until you send a prompt. After that there is nothing to undo.
+- a slash command
+- a message with attachments
+- a resumed session
+- a headless `claude -p` run, which has no prompt box to review in
 
-**Show original** appears beside Undo and opens your draft as typed under the buttons, so you can check the rewrite against it. **Hide original** closes it.
+**Undo** appears after a rewrite and puts your original draft back. It stays until you send a prompt.
 
-**Cancel** stops a rewrite in progress. Your draft stays as it was.
+**Show original** opens your draft as typed under the buttons, so you can check the rewrite against it. **Hide original** closes it.
+
+**Cancel** stops a rewrite in progress and leaves your draft in the box.
 
 From the keyboard, run:
 
@@ -82,25 +87,20 @@ From the keyboard, run:
 
 The rewrite goes into the prompt box, replacing whatever is there, and Undo restores the draft you passed to the command. If the box cannot take the text, the rewrite is printed in the command's reply so you can copy it. Running `/organize` with no draft prints a usage line.
 
-The button deliberately does nothing, and says why in the band, when:
+`/organize` works whether the toggle is on or off, on any message.
 
-- the box is empty or holds only whitespace. No model call is made.
-- the draft starts with `/`. Slash commands are left alone.
-- you kept typing while the rewrite ran. Your typing is never overwritten. Click again to organize the new text.
-
-A failed rewrite also leaves the draft unchanged, with the reason shown in the band until your next action. One that runs past `timeoutSeconds` is reported as cancelled. Clicks while a rewrite is already running are ignored.
+If you keep typing while a rewrite runs, the mod does not overwrite your typing. A failed rewrite leaves the draft in the box, and the band shows the reason until your next action. A rewrite that runs past `timeoutSeconds` counts as cancelled.
 
 ## Settings
 
-Settings live in `settings.json` at the root of the mod's folder. The mod reads the file at every click, so an edit applies to the next rewrite without a reload. The shipped file:
+Settings live in `settings.json` at the root of the mod's folder. The mod reads the file at every rewrite, so an edit applies to the next rewrite without a reload. The shipped file:
 
 ```json
 {
   "model": "Opus 5.5",
   "effort": "medium",
   "timeoutSeconds": 90,
-  "maxOutputTokens": 4096,
-  "organizeFirstPrompt": true
+  "maxOutputTokens": 4096
 }
 ```
 
@@ -110,7 +110,6 @@ Settings live in `settings.json` at the root of the mod's folder. The mod reads 
 | `effort` | `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` | `"medium"` |
 | `timeoutSeconds` | Whole number from 5 to 600 | `90` |
 | `maxOutputTokens` | Whole number from 256 to 64000 | `4096` |
-| `organizeFirstPrompt` | `true` or `false` | `true` |
 
 `model` takes a model by name, such as `"Opus 5.5"`, `"Sonnet 5.5"` or `"Haiku 5.5"`. The mod turns a name into its id, so `"Sonnet 5.5"` is sent as `claude-sonnet-5-5`. A full model id or an alias such as `opus` is sent as written, for Claude Code to resolve.
 
@@ -137,9 +136,9 @@ The model gets a fixed set of rules plus your draft, and nothing else. In plain 
 
 ## Things to know
 
-- Each click, and each caught first message, is one extra model call, billed to your session like any other.
+- Each organized message is one extra model call, billed to your session like any other.
 - The draft goes to the model through the session's own API client. Only the draft is sent. The rewrite does not see your conversation, so a draft that says "fix the bug we just discussed" stays exactly that vague, and will likely get a question in the unclear list.
-- The button sits in the band above the prompt box because mods cannot place a control beside the **+** itself.
+- The toggle sits in the band above the prompt box because mods cannot place a control beside the **+** itself.
 - Drafts with image attachments are untested.
 
 ## Development
@@ -156,4 +155,4 @@ Run the tests:
 claude plugin test <folder>
 ```
 
-The tests in `hooks/register.test.tsx` cover: Organize rewriting the box and Undo restoring it, in both the terminal and the desktop app; Show original; an empty draft making no model call; a failed rewrite leaving the draft alone and its reason staying in the band; the count of questions a rewrite ends with; `settings.json` choosing the model, with an invalid field falling back to its default and a toast; the Opus 5.5, medium-effort defaults when there is no settings file; a new session's first message being organized into the box instead of sent; and that message going through untouched with no prompt box, with `organizeFirstPrompt` off, or in a resumed session.
+The tests in `hooks/register.test.tsx` cover the toggle flipping and being stored, in the terminal and the desktop app. With the toggle on, they check that the first message is organized into the box and not sent, that Show original and Undo work on it, and that the next Enter goes through. They check that the first message is sent as typed with the toggle off, in a session with earlier turns, and with no prompt box. They also cover a box that attaches late, a failed rewrite, `settings.json` choosing the model with a bad field falling back, the Opus 5.5 medium-effort defaults, and the count of questions a rewrite ends with.

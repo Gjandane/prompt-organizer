@@ -18,8 +18,6 @@ type Settings = {
   timeoutSeconds: number
   /** The cap on the rewrite's length, in tokens. */
   maxOutputTokens: number
-  /** Whether a new session's first message is organized instead of sent. */
-  organizeFirstPrompt: boolean
 }
 
 const SETTINGS_FILE = 'settings.json'
@@ -29,7 +27,6 @@ const DEFAULTS: Settings = {
   effort: 'medium',
   timeoutSeconds: 90,
   maxOutputTokens: 4096,
-  organizeFirstPrompt: true,
 }
 
 // A model written by name becomes its id: "Opus 5.5" is "claude-opus-5-5".
@@ -110,12 +107,6 @@ const loadSettings = async (
     ignored.push('maxOutputTokens')
   }
 
-  if (typeof stored.organizeFirstPrompt === 'boolean') {
-    settings.organizeFirstPrompt = stored.organizeFirstPrompt
-  } else if (stored.organizeFirstPrompt !== undefined) {
-    ignored.push('organizeFirstPrompt')
-  }
-
   return ignored.length > 0
     ? {
         settings,
@@ -141,6 +132,23 @@ const model = atom(
   { plugin: 'prompt-organizer', key: 'model' } as const,
   null as string | null,
 )
+// The toggle, mirrored from $.store so the band redraws when it flips. The
+// store keeps it between sessions: a new session's first message is sent
+// before any band is drawn, so the setting has to be there already.
+const ON_KEY = 'isOn'
+const isOn = atom({ plugin: 'prompt-organizer', key: 'isOn' } as const, false)
+
+const readToggle = async ($: EngineInterface): Promise<boolean> =>
+  (await $.store.get(ON_KEY)) === true
+
+const flip = async ($: EngineInterface): Promise<void> => {
+  const next = !(await readToggle($))
+
+  await $.store.set(ON_KEY, next)
+  await update($, isOn, () => next)
+  await update($, status, () => null)
+}
+
 const isFirstHandled = atom(
   { plugin: 'prompt-organizer', key: 'isFirstHandled' } as const,
   false,
@@ -272,67 +280,6 @@ const rewrite = async ($: EngineInterface, draft: string): Promise<Rewrite> => {
 const say = ($: EngineInterface, tone: Status['tone'], text: string): Promise<unknown> =>
   update($, status, () => ({ tone, text }))
 
-// The button's press: the draft in the box is rewritten in place.
-const organizeBox = async ($: EngineInterface): Promise<void> => {
-  if ((await read($, phase)) === 'working') {
-    return
-  }
-
-  const box = await $.prompt.read()
-  const draft = box.text.trim()
-
-  if (!draft) {
-    await say($, 'info', 'Type your draft in the prompt box first.')
-
-    return
-  }
-
-  if (draft.startsWith('/')) {
-    await say($, 'info', 'That draft is a slash command, so it was left as is.')
-
-    return
-  }
-
-  await update($, status, () => null)
-  await update($, phase, () => 'working' as Phase)
-
-  try {
-    const startedAt = await $.clock.now()
-    const result = await rewrite($, draft)
-
-    if (!result.isOk) {
-      await say($, 'error', result.why)
-
-      return
-    }
-
-    // Typing that went on during the rewrite is never overwritten.
-    const now = await $.prompt.read()
-
-    if (now.text !== box.text) {
-      await say($, 'info', 'You kept typing, so the rewrite was not applied. Click Organize again.')
-
-      return
-    }
-
-    const filled = await $.prompt.fill({ text: result.text, mode: 'replace' })
-
-    if (!filled.isFilled) {
-      await say($, 'error', 'The prompt box could not take the rewrite. Your draft is unchanged.')
-
-      return
-    }
-
-    const took = (await $.clock.now()) - startedAt
-
-    await update($, original, () => box.text)
-    await update($, isComparing, () => false)
-    await say($, 'ok', summary(result.model, took, countQuestions(result.text)))
-  } finally {
-    await update($, phase, () => 'idle' as Phase)
-  }
-}
-
 const undo = async ($: EngineInterface): Promise<void> => {
   const before = await read($, original)
 
@@ -346,21 +293,6 @@ const undo = async ($: EngineInterface): Promise<void> => {
     await update($, original, () => null)
     await update($, isComparing, () => false)
     await say($, 'info', 'Your original draft is back in the box.')
-  }
-}
-
-// One line per first message, beside the mod's folder, saying what the
-// catch decided and why. Temporary, while the desktop path is being proven.
-const trace = async ($: EngineInterface, line: string): Promise<void> => {
-  try {
-    const path = `${$.plugin.root}.debug.log`
-    const before = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
-    const at = new Date((await $.clock.now())).toISOString()
-
-    await $.fs.write(path, `${before}${at} ${line}
-`)
-  } catch {
-    // A log that cannot be written changes nothing.
   }
 }
 
@@ -393,8 +325,6 @@ const organizeFirst = async (
   const kept = await $.prompt.fill({ text: draft, mode: 'replace' })
   const isBoxLate = !kept.isFilled && kept.refusal !== 'dialog' && isFromApp
 
-  await trace($, `first message: kept=${kept.isFilled} refusal=${kept.refusal ?? '-'} late=${isBoxLate}`)
-
   if (!kept.isFilled && !isBoxLate) {
     return null
   }
@@ -420,8 +350,6 @@ const organizeFirst = async (
     }
 
     const filled = await fillWhenReady($, result.text)
-
-    await trace($, `rewrite filled=${filled.isFilled} refusal=${filled.refusal ?? '-'}`)
 
     if (!filled.isFilled) {
       return `Not sent. The prompt box could not take the rewrite, so here it is to copy:
@@ -450,6 +378,8 @@ export const register: Register = on => {
       argumentHint: '<messy draft>',
     })
     await update($, phase, () => 'idle' as Phase)
+    const isToggledOn = await readToggle($)
+    await update($, isOn, () => isToggledOn)
     const { settings } = await loadSettings($)
     await update($, model, () => settings.model)
 
@@ -507,12 +437,7 @@ export const register: Register = on => {
       const isFromApp = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
       const isPersonal = isFromApp || e.origin.kind === 'sdk'
       const turns = await $.session.turns()
-      const isOn = (await loadSettings($)).settings.organizeFirstPrompt
-
-      await trace(
-        $,
-        `submit origin=${e.origin.kind} turns=${turns} command=${e.command?.name ?? '-'} meta=${e.isMeta ?? false} turnId=${e.turnId ?? '-'} attachments=${e.attachments?.length ?? 0} on=${isOn} surfaces=${JSON.stringify(await $.session.surfaces())}`,
-      )
+      const isToggledOn = await readToggle($)
 
       if (
         isPersonal &&
@@ -522,7 +447,7 @@ export const register: Register = on => {
         !e.turnId &&
         !e.attachments?.length &&
         turns === 0 &&
-        isOn
+        isToggledOn
       ) {
         const held = await organizeFirst($, e.text, isFromApp)
 
@@ -568,6 +493,7 @@ export const register: Register = on => {
       )
     }
 
+    const isToggledOn = await read($, isOn)
     const isOrganized = before !== null
     const isOpen = isOrganized && (await read($, isComparing))
     // The hint needs room beside the button; a narrow band goes without it.
@@ -577,10 +503,10 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Box gap={1} alignItems="center" flexWrap="wrap">
           <Button
-            key="organize"
-            label="Organize prompt"
-            variant={isOrganized ? 'secondary' : 'primary'}
-            onPress={() => organizeBox($)}
+            key="toggle"
+            label={isToggledOn ? 'Organizer: On' : 'Organizer: Off'}
+            variant={isToggledOn ? 'primary' : 'secondary'}
+            onPress={() => flip($)}
           />
           {isOrganized && <Button key="undo" label="Undo" onPress={() => undo($)} />}
           {isOrganized && (
@@ -595,7 +521,9 @@ export const register: Register = on => {
           {note?.tone === 'info' && <Text dimColor>{note.text}</Text>}
           {note === null && hasRoom && (
             <Text dimColor>
-              Rewrites your draft with {name}. Nothing is sent until you press Enter.
+              {isToggledOn
+                ? `A new session's first message is organized with ${name} before it is sent.`
+                : 'Off: messages are sent as typed.'}
             </Text>
           )}
         </Box>

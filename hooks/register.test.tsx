@@ -23,310 +23,212 @@ const USAGE = {
   cache_creation_input_tokens: 0,
 }
 
-test('Organize rewrites the draft in the box and Undo restores it', async ($, on) => {
-  let box = MESSY
-  let asked = ''
+// The person's Enter in the app.
+const ENTER = { kind: 'composer' } as const
 
-  on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('fs.exists', () => ({ value: false }))
-  on('clock.now', () => ({ value: 0 }))
-  on('model.complete', (_, e) => {
-    asked = e.prompt
+type Stage = {
+  /** What the store holds under the toggle's key; unset when left out. */
+  isOn?: boolean
+  /** The user turns the session already has; the messages entered when left out. */
+  turns?: number
+  /** settings.json as text; no file when left out. */
+  settings?: string
+  /** What the model answers; CLEAN when left out. */
+  reply?: { isAnswered: true; text: string } | { isAnswered: false; reason: 'empty-reply' }
+  /** How many fills the box refuses before it takes one. */
+  lateFills?: number
+  /** Whether the session has no prompt box at all. */
+  isHeadless?: boolean
+}
 
-    return { value: { isAnswered: true, text: CLEAN, usage: USAGE } }
+// Every call the mod makes on $, answered as a session would. Registered
+// before the first call on $, as the test kit requires.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const stage = (on: any, opts: Stage = {}) => {
+  const seen = {
+    box: '',
+    entered: [] as string[],
+    store: new Map<string, unknown>(),
+    sent: {} as { model?: string; effort?: string; timeoutMs?: number; prompt?: string },
+    calls: 0,
+    toasts: [] as string[],
+  }
+  let fills = 0
+
+  if (opts.isOn !== undefined) {
+    seen.store.set('isOn', opts.isOn)
+  }
+
+  on('store.get', (_: unknown, e: { key: string }) => ({ value: seen.store.get(e.key) }))
+  on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
+    seen.store.set(e.key, e.value)
+
+    return { value: undefined }
   })
-  on('prompt.fill', (_, e) => {
-    box = e.text
+  on('fs.exists', () => ({ value: opts.settings !== undefined }))
+  on('fs.read', () => ({ value: opts.settings ?? '' }))
+  on('clock.now', () => ({ value: 0 }))
+  on('clock.sleep', () => ({ value: undefined }))
+  on('ui.toast', (_: unknown, e: { text: string }) => {
+    seen.toasts.push(e.text)
+
+    return { value: undefined }
+  })
+  on('session.turns', () => ({ value: opts.turns ?? seen.entered.length }))
+  on('prompt.read', () => ({ value: { text: seen.box, cursor: seen.box.length } }))
+  on('model.complete', (_: unknown, e: typeof seen.sent) => {
+    seen.calls += 1
+    seen.sent = e
+
+    return { value: { ...(opts.reply ?? { isAnswered: true, text: CLEAN }), usage: USAGE } }
+  })
+  on('prompt.fill', (_: unknown, e: { text: string }) => {
+    fills += 1
+
+    if (opts.isHeadless || fills <= (opts.lateFills ?? 0)) {
+      return { isFilled: false, refusal: 'no_composer' }
+    }
+
+    seen.box = e.text
 
     return { isFilled: true }
   })
+  on('prompt.submit', (_: unknown, e: { text: string }) => {
+    seen.entered.push(e.text)
+
+    return { text: e.text }
+  })
+
+  return seen
+}
+
+test('the toggle flips between Off and On and is kept in the store', async ($, on) => {
+  const seen = stage(on)
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    box = MESSY
-    asked = ''
+    seen.store.delete('isOn')
 
     const ui = await $.ui.mount({ ...BAND, surface })
 
-    await ui.press({ key: 'organize' })
-    expect(asked).toContain(MESSY)
-    expect(box).toBe(CLEAN)
-    expect(await ui.find({ type: 'Text', text: /Organized with Opus 5\.5/ })).toBeTruthy()
-
-    // Show original puts the draft as typed under the buttons.
-    await ui.press({ key: 'compare' })
-    expect((await ui.find({ type: 'Text', text: /fix login/ }))?.text).toBe(MESSY)
-
-    await ui.press({ key: 'undo' })
-    expect(box).toBe(MESSY)
-    expect(await ui.find({ type: 'Text', text: /original draft is back/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', label: 'Organizer: Off' })).toBeTruthy()
+    await ui.press({ key: 'toggle' })
+    expect(seen.store.get('isOn')).toBe(true)
+    expect(await ui.find({ type: 'Button', label: 'Organizer: On' })).toBeTruthy()
+    await ui.press({ key: 'toggle' })
+    expect(seen.store.get('isOn')).toBe(false)
     await ui.unmount()
   }
 })
 
-test('an empty draft asks the model nothing', async ($, on) => {
-  let calls = 0
+test('with the toggle on, the first message is organized into the box, not sent', async ($, on) => {
+  const seen = stage(on, { isOn: true })
 
-  on('prompt.read', () => ({ value: { text: '   ', cursor: 0 } }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('fs.exists', () => ({ value: false }))
-  on('clock.now', () => ({ value: 0 }))
-  on('model.complete', () => {
-    calls += 1
+  const first = await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
 
-    return { value: { isAnswered: true, text: CLEAN, usage: USAGE } }
-  })
+  expect(first.drop).toContain('review it in the box')
+  expect(seen.sent.prompt).toContain(MESSY)
+  expect(seen.entered).toEqual([])
+  expect(seen.box).toBe(CLEAN)
 
+  // Show original and Undo work on the held message.
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
 
-  await ui.press({ key: 'organize' })
-  expect(calls).toBe(0)
-  expect(await ui.find({ type: 'Text', text: /Type your draft/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Organized with Opus 5\.5/ })).toBeTruthy()
+  await ui.press({ key: 'compare' })
+  expect((await ui.find({ type: 'Text', text: /fix login/ }))?.text).toBe(MESSY)
+  await ui.press({ key: 'undo' })
+  expect(seen.box).toBe(MESSY)
   await ui.unmount()
+
+  // The next Enter goes through, whatever is in the box.
+  const second = await $.prompt.submit({ text: seen.box, wait: false, origin: ENTER })
+
+  expect(second.drop).toBeUndefined()
+  expect(seen.entered).toEqual([MESSY])
 })
 
-test('a failed rewrite leaves the draft alone', async ($, on) => {
-  let box = MESSY
+test('with the toggle off, the first message is sent as typed', async ($, on) => {
+  const seen = stage(on)
 
-  on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('fs.exists', () => ({ value: false }))
-  on('clock.now', () => ({ value: 0 }))
-  on('model.complete', () => ({
-    value: { isAnswered: false, reason: 'empty-reply', usage: USAGE },
-  }))
-  on('prompt.fill', (_, e) => {
-    box = e.text
+  await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+  expect(seen.calls).toBe(0)
+  expect(seen.entered).toEqual([MESSY])
+})
 
-    return { isFilled: true }
-  })
+test('only the first message is caught', async ($, on) => {
+  const seen = stage(on, { isOn: true, turns: 4 })
+
+  await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+  expect(seen.calls).toBe(0)
+  expect(seen.entered).toEqual([MESSY])
+})
+
+test('with no prompt box the first message goes through with no model call', async ($, on) => {
+  const seen = stage(on, { isOn: true, isHeadless: true })
+
+  await $.prompt.submit({ text: MESSY, wait: false, origin: { kind: 'sdk' } })
+  expect(seen.calls).toBe(0)
+  expect(seen.entered).toEqual([MESSY])
+})
+
+test('a desktop app whose box attaches late still gets the rewrite', async ($, on) => {
+  const seen = stage(on, { isOn: true, lateFills: 2 })
+
+  const first = await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+
+  expect(first.drop).toContain('review it in the box')
+  expect(seen.entered).toEqual([])
+  expect(seen.box).toBe(CLEAN)
+})
+
+test('a failed rewrite holds the message and leaves the draft in the box', async ($, on) => {
+  const seen = stage(on, { isOn: true, reply: { isAnswered: false, reason: 'empty-reply' } })
+
+  const first = await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+
+  expect(first.drop).toContain('Could not organize')
+  expect(seen.box).toBe(MESSY)
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
 
-  await ui.press({ key: 'organize' })
-  expect(box).toBe(MESSY)
-  // The reason stays in the band until the next action.
   expect(await ui.find({ type: 'Text', text: /Could not organize/ })).toBeTruthy()
   await ui.unmount()
 })
 
 test('settings.json picks the model, and a bad field falls back', async ($, on) => {
-  let sent: { model?: string; effort?: string; timeoutMs?: number } = {}
-  const toasts: string[] = []
-
-  on('fs.exists', () => ({ value: true }))
-  on('clock.now', () => ({ value: 0 }))
-  on('fs.read', () => ({
-    value: JSON.stringify({ model: 'Sonnet 5.5', effort: 'turbo', timeoutSeconds: 30 }),
-  }))
-  on('prompt.read', () => ({ value: { text: MESSY, cursor: MESSY.length } }))
-  on('ui.toast', (_, e) => {
-    toasts.push(e.text)
-
-    return { value: undefined }
+  const seen = stage(on, {
+    isOn: true,
+    settings: JSON.stringify({ model: 'Sonnet 5.5', effort: 'turbo', timeoutSeconds: 30 }),
   })
-  on('model.complete', (_, e) => {
-    sent = e
 
-    return { value: { isAnswered: true, text: CLEAN, usage: USAGE } }
-  })
-  on('prompt.fill', () => ({ isFilled: true }))
-
-  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-
-  await ui.press({ key: 'organize' })
-  expect(sent.model).toBe('claude-sonnet-5-5')
-  expect(sent.effort).toBe('medium')
-  expect(sent.timeoutMs).toBe(30000)
-  expect(toasts.some(text => text.includes('effort'))).toBe(true)
-  await ui.unmount()
+  await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+  expect(seen.sent.model).toBe('claude-sonnet-5-5')
+  expect(seen.sent.effort).toBe('medium')
+  expect(seen.sent.timeoutMs).toBe(30000)
+  expect(seen.toasts.some(text => text.includes('effort'))).toBe(true)
 })
 
 test('with no settings file the rewrite runs on Opus 5.5 at medium effort', async ($, on) => {
-  let sent: { model?: string; effort?: string } = {}
+  const seen = stage(on, { isOn: true })
 
-  on('fs.exists', () => ({ value: false }))
-  on('clock.now', () => ({ value: 0 }))
-  on('prompt.read', () => ({ value: { text: MESSY, cursor: MESSY.length } }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('model.complete', (_, e) => {
-    sent = e
-
-    return { value: { isAnswered: true, text: CLEAN, usage: USAGE } }
-  })
-  on('prompt.fill', () => ({ isFilled: true }))
-
-  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-
-  await ui.press({ key: 'organize' })
-  expect(sent.model).toBe('claude-opus-5-5')
-  expect(sent.effort).toBe('medium')
-  await ui.unmount()
+  await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
+  expect(seen.sent.model).toBe('claude-opus-5-5')
+  expect(seen.sent.effort).toBe('medium')
 })
 
 test('the band counts the questions the rewrite ends with', async ($, on) => {
-  const withGaps = `${CLEAN}
+  stage(on, {
+    isOn: true,
+    reply: {
+      isAnswered: true,
+      text: `${CLEAN}\n\nUnclear - ask me before assuming:\n1. Which login?\n2. How slow?`,
+    },
+  })
 
-Unclear - ask me before assuming:
-1. Which login?
-2. How slow?`
-
-  on('fs.exists', () => ({ value: false }))
-  on('clock.now', () => ({ value: 0 }))
-  on('prompt.read', () => ({ value: { text: MESSY, cursor: MESSY.length } }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('model.complete', () => ({
-    value: { isAnswered: true, text: withGaps, usage: USAGE },
-  }))
-  on('prompt.fill', () => ({ isFilled: true }))
+  await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
 
-  await ui.press({ key: 'organize' })
   expect(await ui.find({ type: 'Text', text: /2 questions for you/ })).toBeTruthy()
   await ui.unmount()
-})
-
-// The engine's bottom of the prompt.submit chain: the prompt enters as sent.
-const ENTER = { kind: 'composer' } as const
-
-test('a new session\'s first message is organized into the box, not sent', async ($, on) => {
-  let box = ''
-  const entered: string[] = []
-
-  on('fs.exists', () => ({ value: false }))
-  on('clock.now', () => ({ value: 0 }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('session.surfaces', () => ({ value: ['desktop'] }))
-  on('fs.write', () => ({ value: undefined }))
-  on('session.turns', () => ({ value: entered.length }))
-  on('prompt.read', () => ({ value: { text: box, cursor: box.length } }))
-  on('model.complete', () => ({
-    value: { isAnswered: true, text: CLEAN, usage: USAGE },
-  }))
-  on('prompt.fill', (_, e) => {
-    box = e.text
-
-    return { isFilled: true }
-  })
-  on('prompt.submit', (_, e) => {
-    entered.push(e.text)
-
-    return { text: e.text }
-  })
-
-  const first = await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
-
-  expect(first.drop).toContain('review it in the box')
-  expect(entered).toEqual([])
-  expect(box).toBe(CLEAN)
-
-  // The reviewed rewrite, sent with Enter, goes through.
-  const second = await $.prompt.submit({ text: box, wait: false, origin: ENTER })
-
-  expect(second.drop).toBeUndefined()
-  expect(entered).toEqual([CLEAN])
-})
-
-test('with no prompt box the first message goes through with no model call', async ($, on) => {
-  let calls = 0
-  const entered: string[] = []
-
-  on('fs.exists', () => ({ value: false }))
-  on('clock.now', () => ({ value: 0 }))
-  on('session.surfaces', () => ({ value: ['desktop'] }))
-  on('fs.write', () => ({ value: undefined }))
-  on('session.turns', () => ({ value: 0 }))
-  on('prompt.fill', () => ({ isFilled: false, refusal: 'no_composer' }))
-  on('model.complete', () => {
-    calls += 1
-
-    return { value: { isAnswered: true, text: CLEAN, usage: USAGE } }
-  })
-  on('prompt.submit', (_, e) => {
-    entered.push(e.text)
-
-    return { text: e.text }
-  })
-
-  await $.prompt.submit({ text: MESSY, wait: false, origin: { kind: 'sdk' } })
-  expect(calls).toBe(0)
-  expect(entered).toEqual([MESSY])
-})
-
-test('organizeFirstPrompt false sends the first message as typed', async ($, on) => {
-  const entered: string[] = []
-
-  on('fs.exists', () => ({ value: true }))
-  on('fs.read', () => ({ value: JSON.stringify({ organizeFirstPrompt: false }) }))
-  on('clock.now', () => ({ value: 0 }))
-  on('session.surfaces', () => ({ value: ['desktop'] }))
-  on('fs.write', () => ({ value: undefined }))
-  on('session.turns', () => ({ value: 0 }))
-  on('prompt.submit', (_, e) => {
-    entered.push(e.text)
-
-    return { text: e.text }
-  })
-
-  await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
-  expect(entered).toEqual([MESSY])
-})
-
-test('a resumed session\'s next message is not caught', async ($, on) => {
-  const entered: string[] = []
-
-  on('fs.exists', () => ({ value: false }))
-  on('clock.now', () => ({ value: 0 }))
-  on('session.surfaces', () => ({ value: ['desktop'] }))
-  on('fs.write', () => ({ value: undefined }))
-  on('session.turns', () => ({ value: 4 }))
-  on('prompt.submit', (_, e) => {
-    entered.push(e.text)
-
-    return { text: e.text }
-  })
-
-  await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
-  expect(entered).toEqual([MESSY])
-})
-
-test('a desktop app whose box attaches late still gets the rewrite', async ($, on) => {
-  let box = ''
-  let fills = 0
-  const entered: string[] = []
-
-  on('fs.exists', () => ({ value: false }))
-  on('fs.write', () => ({ value: undefined }))
-  on('clock.now', () => ({ value: 0 }))
-  on('clock.sleep', () => ({ value: undefined }))
-  on('ui.toast', () => ({ value: undefined }))
-  on('session.surfaces', () => ({ value: [] }))
-  on('session.turns', () => ({ value: 0 }))
-  on('model.complete', () => ({
-    value: { isAnswered: true, text: CLEAN, usage: USAGE },
-  }))
-  // The first two fills land before the app has bound its box.
-  on('prompt.fill', (_, e) => {
-    fills += 1
-
-    if (fills <= 2) {
-      return { isFilled: false, refusal: 'no_composer' }
-    }
-
-    box = e.text
-
-    return { isFilled: true }
-  })
-  on('prompt.submit', (_, e) => {
-    entered.push(e.text)
-
-    return { text: e.text }
-  })
-
-  const first = await $.prompt.submit({ text: MESSY, wait: false, origin: ENTER })
-
-  expect(first.drop).toContain('review it in the box')
-  expect(entered).toEqual([])
-  expect(box).toBe(CLEAN)
 })
