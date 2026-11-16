@@ -1,0 +1,5 @@
+{
+  "name": "prompt-organizer",
+  "owner": { "name": "Gjandane" },
+  "plugins": [{ "name": "prompt-organizer", "source": "./" }]
+}

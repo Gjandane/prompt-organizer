@@ -1,0 +1,6 @@
+{
+  "name": "prompt-organizer",
+  "version": "0.1.0",
+  "description": "An Organize button above the prompt box that rewrites a messy draft into a clear, well-structured prompt for you to review before sending.",
+  "types": "./types/index.d.ts"
+}
